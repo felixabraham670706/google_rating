@@ -2,7 +2,7 @@ name: Google Reviews Automation
 
 on:
   schedule:
-    - cron: '0 5 * * *'
+    - cron: '0 18 * * 5'
 
   workflow_dispatch:
 

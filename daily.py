@@ -71,7 +71,7 @@ client = OpenAI(api_key=key )
 
 # Email details
 sender_email = os.getenv("SENDER_EMAIL")
-receiver_email = os.getenv("RECEIVER_EMAIL")
+receiver_email = os.getenv("RECEIVER_EMAIL").split(",")
 app_password = os.getenv("APP_PASSWORD")# Use your generated app password for sending gmail
 
 # ----------------------------------
@@ -1015,17 +1015,53 @@ for key, value in enbd_only.items():
 # ── Quit driver ───────────────────────────────────────────────────────────────
 driver.quit()
 
+def send_simple_email(subject, body):
+
+    msg = EmailMessage()
+
+    msg["Subject"] = subject
+    msg["From"] = sender_email
+    msg["To"] = ", ".join(receiver_email)
+
+    msg.set_content(body)
+
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
+
+        smtp.login(sender_email, app_password)
+
+        smtp.sendmail(
+            sender_email,
+            receiver_email,
+            msg.as_string()
+        )
+
+    print("[EMAIL] Notification email sent.")
+
 # ── Filter negatives & save ───────────────────────────────────────────────────
 if not all_reviews_rows:
     no_negative_reviews = 1
-    print("\nNo reviews extracted across all ENBD branches.")
+    message = "No reviews extracted across all ENBD branches."
+    print(f"\n{message}")
+    send_simple_email(
+        subject=f"Google Reviews Automation Update - {date_suffix}",
+        body=message
+    )
+
+
+    ##print("\nNo reviews extracted across all ENBD branches.")
 else:
     all_reviews = pd.concat(all_reviews_rows, ignore_index=True)
     final_df_reviews = all_reviews[all_reviews['label_rating'] < 4]
 
     if final_df_reviews.empty:
         no_negative_reviews = 1
-        print("\nNo negative reviews found in last 24 hours.")
+        message = "No negative reviews found in last 24 hours."
+        print(f"\n{message}")
+        send_simple_email(
+            subject=f"Google Reviews Automation Update - {date_suffix}",
+            body=message
+        )
+    
     else:
         # Add bank / emirate / branch columns
         final_df_reviews[['bank', 'emirate', 'branch']] = (
@@ -1122,14 +1158,19 @@ if no_negative_reviews == 0:
     msg = EmailMessage()
     msg["Subject"] = f"Branch Google Reviews - Negative Posts - {date_suffix}"
     msg["From"] = sender_email
-    msg["To"] = receiver_email
+    msg["To"] = ", ".join(receiver_email)
     msg.set_content(response_text)  # Fallback plain text
     msg.add_alternative(html_newsletter, subtype="html")  # HTML body
                 
     # Send the email
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
         smtp.login(sender_email, app_password)
-        smtp.send_message(msg)
+        #smtp.send_message(msg)
+        smtp.sendmail(
+            sender_email,
+            receiver_email,
+            msg.as_string())
+
 
     print("Email sent successfully with embedded image!")
 
