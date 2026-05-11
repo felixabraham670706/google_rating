@@ -1128,7 +1128,7 @@ if no_negative_reviews == 0:
 
     # Opening line of the email
     opening_line = (
-        "Good Morning team,<br>"
+        "Hello team,<br>"
         "Here is a summary of the negative Google reviews received in last 24 hours from all ENBD branches."
     )
     
