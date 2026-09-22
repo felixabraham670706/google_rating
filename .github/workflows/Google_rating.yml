@@ -11,7 +11,12 @@ jobs:
 
     runs-on: ubuntu-latest
 
-    timeout-minutes: 60
+    # Raised as a safety margin: with 72 ENBD branches, even the sped-up
+    # per-branch selectors (see daily.py) plus normal network latency and
+    # the randomized 5-15s sleep between branches can add up. 120 minutes
+    # gives headroom without approaching GitHub-hosted runners' 360-minute
+    # per-job cap.
+    timeout-minutes: 120
 
     steps:
 
