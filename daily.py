@@ -52,6 +52,27 @@ branch_region_mapping = pd.read_excel('branch_region_mapping.xlsx')
 # ----------------------------------
 date_suffix = datetime.now().strftime("%d%b%Y")  # Get current date in ddmmmyyyy format e.g., '18Nov2025'
 
+# Persistent Chrome profile directory. Reusing the SAME profile across runs
+# (instead of a brand-new, cookie-less profile every time) makes Chrome look
+# like a returning/trusted client to Google, which cuts down on the random
+# "please sign in" / consent interstitial that was breaking the sort step
+# (the captured menu.html from a failed run shows literally no [role=menu]
+# element in the DOM at all -- i.e. the sort dropdown never opened, which is
+# what an overlay sitting on top of the page produces).
+#
+# On GitHub Actions, cache this directory between runs (actions/cache) or
+# every run gets a brand-new profile again and you're back to square one.
+CHROME_PROFILE_DIR = os.getenv(
+    "CHROME_PROFILE_DIR",
+    os.path.join(os.getcwd(), "chrome_profile")
+)
+os.makedirs(CHROME_PROFILE_DIR, exist_ok=True)
+
+# How many times to retry a branch end-to-end (reload + re-click) before
+# giving up on it. The sign-in/consent interstitial is intermittent, so a
+# reload usually clears it.
+MAX_BRANCH_ATTEMPTS = 3
+
 # ----------------------------------
 # CONFIGURATION
 # ----------------------------------
@@ -111,16 +132,16 @@ def convert_gpt_text_to_html(text):
 
 # HELPER: Build the GPT Prompt
 def build_prompt_for_daily_email(review_data):
-    
+
     # Filter reviews for the selected month
     if review_data.empty:
         return "No negative reviews found for the day."
-    
+
     # Negative reviews text
     negative_reviews_text = ""
     for _, row in review_data.iterrows():
-        negative_reviews_text += f"- {row['branch']} from {row['region']} \n received star rating: {row['label_rating']} \n user comment: {row['User_comment_review']} \n bank responded: {row['Response_to_review']}\n\n"    
-    
+        negative_reviews_text += f"- {row['branch']} from {row['region']} \n received star rating: {row['label_rating']} \n user comment: {row['User_comment_review']} \n bank responded: {row['Response_to_review']}\n\n"
+
     # Final prompt
     prompt = f"""
 You are a senior Customer Experience Manager at Emirates NBD.
@@ -209,10 +230,10 @@ For each review object:
 • "category": one primary Theme of Concern or reason (a short phrase you define, or "Not specified by the user" if there is no comment).
 • "branch_name": branch name from the input (exact text, if available).
 • "region_name": region name from the input (exact text, if available).
-• "rating": numeric rating as a float (e.g., 1.0, 2.0, 3.0). 
+• "rating": numeric rating as a float (e.g., 1.0, 2.0, 3.0).
   - If rating is given as text (e.g. "1 star"), convert to the correct numeric value.
 • "review_text": the exact customer review text (do not paraphrase or edit). If the user left no comment, use an empty string "".
-• "responded": 
+• "responded":
   - true if there is a bank/branch response to this review in the input data.
   - false if there is clearly no response present.
 
@@ -242,10 +263,10 @@ Now, produce ONLY the final JSON object, with:
 
 # Function to get GPT-4o response
 def generate_newsletter():
-    prompt = build_prompt_for_daily_email(final_df_reviews)    
+    prompt = build_prompt_for_daily_email(final_df_reviews)
     if prompt.startswith("No reviews found"):
         return prompt  # No data to summarize
-    
+
     response = client.chat.completions.create(
         model="gpt-4o",
         messages=[
@@ -267,7 +288,7 @@ def generate_negative_reviews_daily_image(data: Dict[str, Any],
 
     Args:
         data: dictionary with keys:
-            - date_str: str 
+            - date_str: str
             - intro: str
             - reviews: List[{
                   "category": str,
@@ -349,7 +370,7 @@ def generate_negative_reviews_daily_image(data: Dict[str, Any],
                                width=outline_width)
 
     # ---- star rating helpers (optional per review) ----
-    
+
     def draw_star_polygon(cx, cy, outer_radius, inner_radius, num_points=5):
         """Generate points for a star shape polygon"""
         points = []
@@ -534,9 +555,9 @@ def generate_negative_reviews_daily_image(data: Dict[str, Any],
         rating = rv.get("rating")
         if rating is not None:
             # draw_star_row(draw, inner_x, inner_y, float(rating))
-            
+
             draw_star_row(img, draw, inner_x, inner_y, float(rating))
-            
+
             inner_y += 40
 
         # Review text
@@ -554,7 +575,7 @@ def generate_negative_reviews_daily_image(data: Dict[str, Any],
 
         # divider between cards
         y = card_bottom + CARD_VERTICAL_GAP
-        
+
     # =========================
     # FOOTER
     # =========================
@@ -570,7 +591,7 @@ def generate_negative_reviews_daily_image(data: Dict[str, Any],
         )
 
     footer_text_y = footer_divider_y + 30
-    
+
     # Left footer text
     left_footer_text = "Strategy & Customer Intelligence"
     draw.text(
@@ -592,7 +613,7 @@ def generate_negative_reviews_daily_image(data: Dict[str, Any],
         fill=(120, 120, 120),
         spacing=4
         )
-    
+
     return img
 
 # ----------------------------------
@@ -607,7 +628,7 @@ def generate_negative_reviews_daily_image(data: Dict[str, Any],
 
 # ── Driver ────────────────────────────────────────────────────────────────────
 
-def create_driver():
+def _build_chrome_options():
     options = uc.ChromeOptions()
     #options.add_argument("--headless")
     options.add_argument("--lang=en")
@@ -616,12 +637,137 @@ def create_driver():
     options.add_argument("--window-size=1920,1080")
     options.add_argument("--start-maximized")
     options.add_argument("--disable-blink-features=AutomationControlled")
-    
     options.add_argument("--disable-gpu")
+
+    # ── Persistent profile ──────────────────────────────────────────────────
+    # Reusing the same Chrome profile across runs (instead of a brand new,
+    # cookie-less one every time) makes the browser look like a returning
+    # client to Google, which is the main lever against the intermittent
+    # "please sign in" / consent interstitial that breaks the sort step.
+    options.add_argument(f"--user-data-dir={CHROME_PROFILE_DIR}")
+    options.add_argument("--profile-directory=Default")
+
     options.add_experimental_option('prefs', {'intl.accept_languages': 'en,en_US'})
-    driver = uc.Chrome(options=options,version_main=151)
-    print("[SETUP] Chrome launched successfully.\n")
-    return driver
+    return options
+
+
+def create_driver():
+    """
+    Launch Chrome via undetected_chromedriver.
+
+    IMPORTANT: version_main is intentionally NOT hardcoded. A pinned number
+    (e.g. version_main=151) breaks the instant the actually-installed Chrome
+    on the runner drifts past/behind that version -- which is exactly the
+    "fails in under 2 minutes, before a browser window ever opens" symptom.
+    `browser-actions/setup-chrome@v1` in the CI workflow tracks whatever
+    "stable" currently is, so it WILL drift over time if left unpinned there.
+
+    Leaving version_main unset lets undetected_chromedriver inspect the
+    Chrome binary that's actually installed and auto-match a chromedriver
+    to it -- this removes the failure mode entirely instead of chasing it
+    with a hardcoded number that inevitably goes stale again.
+
+    A short fallback loop over nearby explicit versions is kept underneath
+    as a safety net only, in case auto-detection itself ever errors out
+    (rare, but seen occasionally on some runner images / driver-cache
+    states) -- not as the primary strategy.
+    """
+    options = _build_chrome_options()
+
+    try:
+        driver = uc.Chrome(options=options)  # version_main omitted -> auto-detect
+        print("[SETUP] Chrome launched successfully (auto-detected version).\n")
+        return driver
+    except Exception as e:
+        print(f"[SETUP] Auto-detected Chrome launch failed: {e}")
+        print("[SETUP] Falling back to explicit version probing...")
+
+    # Fallback: try a small range of recent major versions explicitly.
+    # Adjust this range occasionally as Chrome's release train moves on;
+    # it only gets used if auto-detect above already failed.
+    for candidate_version in range(140, 152):
+        try:
+            options = _build_chrome_options()  # fresh options object per attempt
+            driver = uc.Chrome(options=options, version_main=candidate_version)
+            print(f"[SETUP] Chrome launched successfully (version_main={candidate_version}).\n")
+            return driver
+        except Exception as e:
+            print(f"  [SETUP] version_main={candidate_version} failed: {e}")
+            continue
+
+    raise RuntimeError(
+        "Could not launch Chrome via undetected_chromedriver, either by "
+        "auto-detection or by probing fallback versions 140-151. This is "
+        "likely an environment issue (Chrome not installed, or a chromedriver "
+        "cache from a previous version conflicting) rather than something "
+        "a version number can fix -- check the 'Install Chrome' step output."
+    )
+
+
+def dismiss_signin_or_consent_overlay(driver):
+    """
+    Google Maps sometimes throws a cookie-consent banner or a "sign in"
+    nudge over the page before the Reviews/Sort UI is interactable. When
+    that happens, elements like the "Newest" menu item never appear in the
+    DOM at all, and it LOOKS like a scraping/selector bug
+    ("Newest sort option not found") when it's actually this overlay
+    blocking the page.
+
+    Tries a few known dismiss patterns. Returns True if something was
+    found and handled (dismissed, or detected as a sign-in modal so the
+    caller knows to reload/retry rather than keep hammering the same DOM).
+    """
+    # Cookie / consent banners -------------------------------------------------
+    consent_strategies = [
+        (By.XPATH, '//button[.//span[contains(text(),"Accept all")]]'),
+        (By.XPATH, '//button[.//span[contains(text(),"Reject all")]]'),
+        (By.XPATH, '//button[contains(@aria-label,"Accept all")]'),
+        (By.XPATH, '//button[contains(@aria-label,"Reject all")]'),
+        (By.XPATH, '//button[contains(text(),"قبول الكل")]'),
+        (By.XPATH, '//button[contains(text(),"رفض الكل")]'),
+    ]
+    for by, sel in consent_strategies:
+        try:
+            btn = WebDriverWait(driver, 2).until(EC.element_to_be_clickable((by, sel)))
+            btn.click()
+            time.sleep(1)
+            return True
+        except Exception:
+            continue
+
+    # Dismissible "sign in" nudge banners (small X / "Not now") ---------------
+    dismiss_strategies = [
+        (By.XPATH, '//button[contains(@aria-label,"Dismiss")]'),
+        (By.XPATH, '//button[contains(@aria-label,"Not now")]'),
+        (By.XPATH, '//button[contains(@aria-label,"Close")]'),
+    ]
+    for by, sel in dismiss_strategies:
+        try:
+            btn = WebDriverWait(driver, 2).until(EC.element_to_be_clickable((by, sel)))
+            btn.click()
+            time.sleep(1)
+            return True
+        except Exception:
+            continue
+
+    # Embedded Google sign-in iframe/modal (accounts.google.com) -------------
+    # This one usually can't be "dismissed" cleanly -- best move is to signal
+    # to the caller that it was detected, so it reloads the page and retries.
+    try:
+        driver.find_element(By.XPATH, '//iframe[contains(@src,"accounts.google.com")]')
+        print("  [INFO] Sign-in overlay detected.")
+        return True
+    except Exception:
+        pass
+
+    try:
+        driver.find_element(By.XPATH, '//div[contains(@aria-label,"Sign in")]')
+        print("  [INFO] Sign-in prompt detected.")
+        return True
+    except Exception:
+        pass
+
+    return False
 
 
 def find_reviews_button(driver):
@@ -913,6 +1059,93 @@ def scroll_and_extract(driver, reviews_container):
     return all_reviews
 
 
+# ── Branch processing with retry ───────────────────────────────────────────────
+
+def process_branch(driver, wait, key, value, max_attempts=MAX_BRANCH_ATTEMPTS):
+    """
+    Loads a branch's Maps page, opens Reviews, sorts by Newest, and scrolls
+    to collect the last 24h of reviews.
+
+    Wrapped in a retry loop because the failure mode being fought here is an
+    INTERMITTENT sign-in / consent overlay that blocks the sort UI from
+    appearing at all -- not a broken selector (confirmed by the captured
+    menu.html showing literally no [role=menu] element in the DOM on a
+    failed run). A fresh page load usually clears the overlay, so this
+    reloads and tries again up to `max_attempts` times before actually
+    giving up on the branch.
+    """
+    for attempt in range(1, max_attempts + 1):
+        try:
+            driver.get(value)
+
+            try:
+                wait.until(EC.presence_of_element_located((By.XPATH, '//div[@role="main"]')))
+            except TimeoutException:
+                time.sleep(2)
+            time.sleep(1)
+
+            # Clear any consent/sign-in overlay before touching the UI
+            overlay_seen = dismiss_signin_or_consent_overlay(driver)
+            if overlay_seen:
+                time.sleep(1)
+
+            # ── Find & click Reviews tab ──────────────────────────────────────
+            reviews_button = find_reviews_button(driver)
+            if reviews_button is None:
+                print(f"  [DEBUG] Reviews button not found for: {key} (attempt {attempt}/{max_attempts})")
+                if attempt < max_attempts:
+                    time.sleep(3)
+                    continue
+                buttons = driver.find_elements(By.TAG_NAME, 'button')
+                for btn in buttons:
+                    label = btn.get_attribute('aria-label') or ''
+                    text  = btn.text[:60] if btn.text else ''
+                    if label or text:
+                        print(f"    text='{text}' | aria-label='{label}'")
+                return []
+
+            reviews_button.click()
+            time.sleep(0.3)
+
+            # Overlay can also appear right after opening the Reviews tab
+            overlay_seen = dismiss_signin_or_consent_overlay(driver)
+            if overlay_seen:
+                time.sleep(1)
+
+            # ── Sort by Newest ────────────────────────────────────────────────
+            sorted_ok = click_sort_newest(driver)
+            if not sorted_ok:
+                print(f"  [WARNING] Could not sort by newest for: {key} (attempt {attempt}/{max_attempts})")
+                if attempt < max_attempts:
+                    print(f"  [INFO] Reloading and retrying {key}...")
+                    time.sleep(3)
+                    continue
+                return []
+            time.sleep(2)
+
+            # ── Find scrollable container ─────────────────────────────────────
+            reviews_container = find_reviews_container(driver)
+            if reviews_container is None:
+                print(f"  [WARNING] Reviews container not found for: {key} (attempt {attempt}/{max_attempts})")
+                if attempt < max_attempts:
+                    time.sleep(3)
+                    continue
+                return []
+
+            # ── Scroll & extract ──────────────────────────────────────────────
+            raw_reviews = scroll_and_extract(driver, reviews_container)
+            return raw_reviews
+
+        except Exception as e:
+            print(f"  [ERROR] {key} (attempt {attempt}/{max_attempts}): {e}")
+            if attempt < max_attempts:
+                time.sleep(3)
+                continue
+            return []
+
+    return []
+
+
 # ── Preprocessing ─────────────────────────────────────────────────────────────
 
 def preprocess_reviews(reviews_df):
@@ -957,60 +1190,18 @@ for key, value in enbd_only.items():
 
     print(f"\n[BRANCH] {key}")
 
-    try:
-        driver.get(value)
+    raw_reviews = process_branch(driver, wait, key, value)
 
-        try:
-            wait.until(EC.presence_of_element_located((By.XPATH, '//div[@role="main"]')))
-        except TimeoutException:
-            time.sleep(2)
-        time.sleep(1)
-
-        # ── Find & click Reviews tab ──────────────────────────────────────────
-        reviews_button = find_reviews_button(driver)
-        if reviews_button is None:
-            print(f"  [DEBUG] Reviews button not found for: {key}")
-            buttons = driver.find_elements(By.TAG_NAME, 'button')
-            for btn in buttons:
-                label = btn.get_attribute('aria-label') or ''
-                text  = btn.text[:60] if btn.text else ''
-                if label or text:
-                    print(f"    text='{text}' | aria-label='{label}'")
-            continue
-
-        reviews_button.click()
-        time.sleep(0.3)
-
-        # ── Sort by Newest ────────────────────────────────────────────────────
-        sorted_ok = click_sort_newest(driver)
-        if not sorted_ok:
-            print(f"  [WARNING] Could not sort by newest for: {key}. Skipping.")
-            continue
-        time.sleep(2)
-
-        # ── Find scrollable container ─────────────────────────────────────────
-        reviews_container = find_reviews_container(driver)
-        if reviews_container is None:
-            print(f"  [WARNING] Reviews container not found for: {key}")
-            continue
-
-        # ── Scroll & extract ──────────────────────────────────────────────────
-        raw_reviews = scroll_and_extract(driver, reviews_container)
-
-        if not raw_reviews:
-            print(f"  [INFO] No reviews in last 24 hours for: {key}")
-            continue
-
-        reviews_df = pd.DataFrame(raw_reviews)
-        reviews_df['branch_flag'] = key
-        reviews_df = preprocess_reviews(reviews_df)
-
-        all_reviews_rows.append(reviews_df)
-        print(f"  [REVIEWS] Extracted {len(reviews_df)} reviews for: {key}")
-
-    except Exception as e:
-        print(f"  [ERROR] {key}: {e}")
+    if not raw_reviews:
+        print(f"  [INFO] No reviews in last 24 hours for: {key}")
         continue
+
+    reviews_df = pd.DataFrame(raw_reviews)
+    reviews_df['branch_flag'] = key
+    reviews_df = preprocess_reviews(reviews_df)
+
+    all_reviews_rows.append(reviews_df)
+    print(f"  [REVIEWS] Extracted {len(reviews_df)} reviews for: {key}")
 
 # ── Quit driver ───────────────────────────────────────────────────────────────
 driver.quit()
@@ -1061,7 +1252,7 @@ else:
             subject=f"Google Reviews Automation Update - {date_suffix}",
             body=message
         )
-    
+
     else:
         # Add bank / emirate / branch columns
         final_df_reviews[['bank', 'emirate', 'branch']] = (
@@ -1107,7 +1298,7 @@ if no_negative_reviews == 0:
             # Remove leading ```json or ``` and trailing ```
             raw = re.sub(r"^```[a-zA-Z]*\n", "", raw)   # remove ``` or ```json + newline
             raw = re.sub(r"\n```$", "", raw.strip())    # remove closing ```
-        response_json = json.loads(raw) 
+        response_json = json.loads(raw)
         #yesterday = datetime.now() - timedelta(days=1)
         date_str = datetime.now().strftime("%d %B %Y")
         response_json['date_str'] = date_str
@@ -1131,7 +1322,7 @@ if no_negative_reviews == 0:
         "Hello team,<br>"
         "Here is a summary of the negative Google reviews received in last 24 hours from all ENBD branches."
     )
-    
+
     # Convert PNG to base64 string
     with open(f"daily_negative_google_reviews_{date_suffix}.png", "rb") as img_file:
         encoded_img = base64.b64encode(img_file.read()).decode("utf-8")
@@ -1147,8 +1338,8 @@ if no_negative_reviews == 0:
 
           <!-- Image (80% width, centered) -->
           <div style="text-align: center; margin: 0; padding: 0;">
-              <img src="data:image/png;base64,{encoded_img}" 
-                    alt="Newsletter Visual" 
+              <img src="data:image/png;base64,{encoded_img}"
+                    alt="Newsletter Visual"
                     style="width:80%; max-width:800px; height:auto; display:block; margin:0 auto;" />
           </div>
       </body>
@@ -1161,7 +1352,7 @@ if no_negative_reviews == 0:
     msg["To"] = ", ".join(receiver_email)
     msg.set_content(response_text)  # Fallback plain text
     msg.add_alternative(html_newsletter, subtype="html")  # HTML body
-                
+
     # Send the email
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
         smtp.login(sender_email, app_password)
