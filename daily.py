@@ -706,23 +706,24 @@ def dismiss_signin_or_consent_overlay(driver):
     without the same risk), this only detects and logs it -- the caller's
     retry-with-reload handles recovery instead.
     """
+    # Bilingual (Arabic + English) combined into single XPath per structural
+    # pattern -- same reasoning as find_reviews_button: avoids paying a full
+    # WebDriverWait timeout for whichever language Google didn't serve.
     consent_strategies = [
-        (By.XPATH, '//button[.//span[contains(text(),"Accept all")]]'),
-        (By.XPATH, '//button[.//span[contains(text(),"Reject all")]]'),
-        (By.XPATH, '//button[contains(@aria-label,"Accept all")]'),
-        (By.XPATH, '//button[contains(@aria-label,"Reject all")]'),
-        (By.XPATH, '//button[contains(text(),"قبول الكل")]'),
-        (By.XPATH, '//button[contains(text(),"رفض الكل")]'),
+        (By.XPATH, '//button[.//span[contains(text(),"Accept all") or contains(text(),"Reject all")]]'),
+        (By.XPATH, '//button[contains(@aria-label,"Accept all") or contains(@aria-label,"Reject all")]'),
+        (By.XPATH, '//button[contains(text(),"قبول الكل") or contains(text(),"رفض الكل")]'),
     ]
     for by, sel in consent_strategies:
         try:
-            btn = WebDriverWait(driver, 2).until(EC.element_to_be_clickable((by, sel)))
+            btn = WebDriverWait(driver, 1).until(EC.element_to_be_clickable((by, sel)))
             btn.click()
             time.sleep(1)
             return True
         except Exception:
             continue
 
+    # Presence checks (not waits) -- instant, no timeout cost when absent.
     try:
         driver.find_element(By.XPATH, '//iframe[contains(@src,"accounts.google.com")]')
         print("  [INFO] Sign-in overlay detected.")
@@ -741,14 +742,25 @@ def dismiss_signin_or_consent_overlay(driver):
 
 
 def find_reviews_button(driver):
-    """Find the Reviews tab using stable aria-label / role selectors."""
+    """
+    Find the Reviews tab using stable aria-label / role selectors.
+
+    Google Maps' UI language is decided server-side by IP geolocation, not
+    by the --lang Chrome flag: a UAE IP (local runs) gets served Arabic,
+    a US IP (GitHub-hosted CI runners) gets served English. Both are
+    legitimate depending on where the script runs, so we still need to
+    handle both -- but checking them as SEPARATE sequential WebDriverWait
+    attempts means every run wastes a full timeout on whichever language
+    isn't being served that time (confirmed as a major, unnecessary chunk
+    of the ~3.5min/branch runtime seen on CI). Combining both languages
+    into ONE XPath per structural pattern (via XPath's own "or") matches
+    immediately regardless of which language Google actually serves,
+    without favoring either environment.
+    """
     strategies = [
-        (By.XPATH, '//button[contains(@aria-label, "المراجعات")]'),
-        (By.XPATH, '//div[@role="tab"][contains(., "المراجعات")]'),
-        (By.XPATH, '//button[.//div[contains(text(), "المراجعات")]]'),
-        (By.XPATH, '//button[contains(@aria-label, "Reviews")]'),
-        (By.XPATH, '//div[@role="tab"][contains(., "Reviews")]'),
-        (By.XPATH, '//button[.//div[contains(text(), "Reviews")]]'),
+        (By.XPATH, '//button[contains(@aria-label,"المراجعات") or contains(@aria-label,"Reviews")]'),
+        (By.XPATH, '//div[@role="tab"][contains(.,"المراجعات") or contains(.,"Reviews")]'),
+        (By.XPATH, '//button[.//div[contains(text(),"المراجعات") or contains(text(),"Reviews")]]'),
     ]
     short_wait = WebDriverWait(driver, 3)
     for by, selector in strategies:
@@ -760,12 +772,17 @@ def find_reviews_button(driver):
     return None
 
 def click_sort_newest(driver):
-    """Click the Sort button, then select Newest."""
+    """
+    Click the Sort button, then select Newest.
+
+    Same bilingual-combining approach as find_reviews_button -- see that
+    function's docstring for why sequential per-language selectors were
+    costing real time on every branch regardless of environment.
+    """
     short_wait = WebDriverWait(driver, 5)
 
     sort_strategies = [
-        (By.XPATH, '//button[contains(@aria-label, "ترتيب")]'),
-        (By.XPATH, '//button[contains(@aria-label, "Sort")]'),
+        (By.XPATH, '//button[contains(@aria-label,"ترتيب") or contains(@aria-label,"Sort")]'),
         (By.XPATH, '//button[@data-value="sort"]'),
         (By.XPATH, '//div[@role="main"]//button[.//span[contains(text(),"ترتيب") or contains(text(),"Sort")]]'),
     ]
@@ -786,10 +803,8 @@ def click_sort_newest(driver):
     time.sleep(1)
 
     newest_strategies = [
-        (By.XPATH, '//div[@role="menuitemradio"][contains(., "الأحدث")]'),
-        (By.XPATH, '//div[@role="menuitemradio"][contains(., "Newest")]'),
-        (By.XPATH, '//li[@role="menuitemradio"][contains(., "الأحدث")]'),
-        (By.XPATH, '//li[@role="menuitemradio"][contains(., "Newest")]'),
+        (By.XPATH, '//div[@role="menuitemradio"][contains(.,"الأحدث") or contains(.,"Newest")]'),
+        (By.XPATH, '//li[@role="menuitemradio"][contains(.,"الأحدث") or contains(.,"Newest")]'),
         (By.XPATH, '(//div[@role="menu"]//div[@role="menuitemradio"])[2]'),  # Newest is always 2nd
         (By.XPATH, '(//div[@data-index="1"])[1]'),
     ]
