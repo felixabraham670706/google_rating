@@ -6,6 +6,7 @@ import time
 import os, sys
 import random
 import re
+import requests
 import undetected_chromedriver as uc
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -655,25 +656,36 @@ def create_driver():
     """
     Launch Chrome via undetected_chromedriver.
 
-    IMPORTANT: version_main is intentionally NOT hardcoded. A pinned number
-    (e.g. version_main=151) breaks the instant the actually-installed Chrome
-    on the runner drifts past/behind that version -- which is exactly the
-    "fails in under 2 minutes, before a browser window ever opens" symptom.
-    `browser-actions/setup-chrome@v1` in the CI workflow tracks whatever
-    "stable" currently is, so it WILL drift over time if left unpinned there.
+    Version resolution order, fastest/most-reliable first:
 
-    Leaving version_main unset lets undetected_chromedriver inspect the
-    Chrome binary that's actually installed and auto-match a chromedriver
-    to it -- this removes the failure mode entirely instead of chasing it
-    with a hardcoded number that inevitably goes stale again.
-
-    A short fallback loop over nearby explicit versions is kept underneath
-    as a safety net only, in case auto-detection itself ever errors out
-    (rare, but seen occasionally on some runner images / driver-cache
-    states) -- not as the primary strategy.
+      1. CHROME_MAJOR_VERSION env var, if set. The CI workflow now reads the
+         ACTUAL installed Chrome's version directly (`chrome --version`) and
+         passes it in here. This is the most reliable source because it
+         completely sidesteps a real bug seen in production logs: `uc`'s own
+         auto-detection queried for chromedriver 153 while the actually
+         installed Chrome was 152 (uc overshoots by one on very new/beta
+         milestone builds that haven't fully propagated to the chromedriver
+         version registry yet). Using the version straight from the binary
+         itself can't have that mismatch.
+      2. `uc`'s own auto-detection (version_main omitted), if #1 isn't set.
+      3. A descending probe over a wide range of versions, only if both
+         #1 and #2 fail. This used to be the primary fallback and cost 9
+         failed launch attempts in one observed run (each with its own
+         chromedriver download) before landing on the right version --
+         it's now a true last resort rather than the main strategy.
     """
-    options = _build_chrome_options()
+    env_version = os.getenv("CHROME_MAJOR_VERSION", "").strip()
+    if env_version.isdigit():
+        try:
+            options = _build_chrome_options()
+            driver = uc.Chrome(options=options, version_main=int(env_version))
+            print(f"[SETUP] Chrome launched successfully (version_main={env_version}, from CHROME_MAJOR_VERSION env var).\n")
+            return driver
+        except Exception as e:
+            print(f"[SETUP] Launch with CHROME_MAJOR_VERSION={env_version} failed: {e}")
+            print("[SETUP] Falling back to auto-detection...")
 
+    options = _build_chrome_options()
     try:
         driver = uc.Chrome(options=options)  # version_main omitted -> auto-detect
         print("[SETUP] Chrome launched successfully (auto-detected version).\n")
@@ -770,6 +782,74 @@ def dismiss_signin_or_consent_overlay(driver):
     except Exception:
         pass
 
+    return False
+
+
+def resolve_maps_url(short_url, timeout=10):
+    """
+    Resolve a maps.app.goo.gl short link to its final canonical
+    google.com/maps/place/... URL over plain HTTP, BEFORE handing it to
+    Selenium.
+
+    Why: the short link's redirect to the specific place can depend on
+    client-side JS timing inside the browser. A run with a brand-new,
+    freshly-created profile (cold caches, nothing pre-warmed) loads slower,
+    and if that redirect hasn't finished by the time the code checks for
+    '//div[@role="main"]', it proceeds against the GENERIC Google Maps
+    homepage instead of the specific branch's page -- which has no Reviews
+    tab because no specific place was ever loaded. That's exactly what a
+    run showed: every branch failed at "Reviews button not found", and the
+    dumped page elements (traffic banner, generic category chips, "United
+    States" map attribution) were the generic Maps view, not a place page.
+
+    Resolving the redirect via a plain HTTP request sidesteps the whole
+    timing dependency -- requests' redirect handling is synchronous and
+    doesn't depend on the browser having rendered/executed anything.
+
+    Falls back to the original short_url if resolution fails for any
+    reason (network hiccup, etc.) -- Selenium then follows the redirect
+    itself as it did before this change, so this is purely additive safety.
+    """
+    try:
+        resp = requests.head(short_url, allow_redirects=True, timeout=timeout)
+        if resp.url and resp.url != short_url:
+            return resp.url
+    except Exception:
+        pass
+    try:
+        resp = requests.get(short_url, allow_redirects=True, timeout=timeout)
+        if resp.url and resp.url != short_url:
+            return resp.url
+    except Exception:
+        pass
+    return short_url
+
+
+def wait_for_place_loaded(driver, timeout=10):
+    """
+    Confirm the browser has actually landed on a SPECIFIC place's page
+    (the branch's own Maps listing), not the generic Maps homepage/search
+    view. '//div[@role="main"]' alone doesn't distinguish the two -- both
+    have a role="main" container -- which is what let the code previously
+    race ahead before the real place had loaded.
+
+    The place-name heading (Google's "DUwDvf" class -- the h1 element
+    showing the business name at the top of its info panel) only exists
+    once a specific place is loaded, so its presence is a much more
+    reliable signal than role="main".
+    """
+    strategies = [
+        (By.XPATH, '//h1[contains(@class,"DUwDvf")]'),
+        (By.XPATH, '//div[@role="main"]//h1'),
+    ]
+    short_wait = WebDriverWait(driver, timeout)
+    for by, selector in strategies:
+        try:
+            el = short_wait.until(EC.presence_of_element_located((by, selector)))
+            if el.text.strip():
+                return True
+        except Exception:
+            continue
     return False
 
 
@@ -1069,17 +1149,30 @@ def process_branch(driver, wait, key, value, max_attempts=MAX_BRANCH_ATTEMPTS):
     Loads a branch's Maps page, opens Reviews, sorts by Newest, and scrolls
     to collect the last 24h of reviews.
 
-    Wrapped in a retry loop because the failure mode being fought here is an
-    INTERMITTENT sign-in / consent overlay that blocks the sort UI from
-    appearing at all -- not a broken selector (confirmed by the captured
-    menu.html showing literally no [role=menu] element in the DOM on a
-    failed run). A fresh page load usually clears the overlay, so this
-    reloads and tries again up to `max_attempts` times before actually
-    giving up on the branch.
+    Wrapped in a retry loop because two different failure modes have been
+    observed, both intermittent and both fixed the same way (reload and
+    retry against a resolved URL):
+      1. A sign-in / consent overlay blocking the sort UI (confirmed by a
+         captured menu.html showing literally no [role=menu] element in
+         the DOM on a failed run).
+      2. The short link's redirect not completing before the code checked
+         readiness, landing on the GENERIC Google Maps view instead of the
+         branch's specific page -- confirmed by a run where every branch
+         failed at "Reviews button not found" and the dumped page elements
+         were generic Maps chrome (traffic banner, category chips, "United
+         States" attribution), not a place page. Resolving the short link
+         to its canonical URL over plain HTTP up front (see
+         resolve_maps_url) and then explicitly confirming the place loaded
+         (see wait_for_place_loaded) closes this second failure mode at
+         its source rather than just retrying blindly into the same race.
     """
+    resolved_url = resolve_maps_url(value)
+    if resolved_url != value:
+        print(f"  [INFO] Resolved short link for {key}")
+
     for attempt in range(1, max_attempts + 1):
         try:
-            driver.get(value)
+            driver.get(resolved_url)
 
             try:
                 wait.until(EC.presence_of_element_located((By.XPATH, '//div[@role="main"]')))
@@ -1091,6 +1184,16 @@ def process_branch(driver, wait, key, value, max_attempts=MAX_BRANCH_ATTEMPTS):
             overlay_seen = dismiss_signin_or_consent_overlay(driver)
             if overlay_seen:
                 time.sleep(1)
+
+            # Confirm we actually landed on the branch's own place page
+            # (not the generic Maps homepage) before hunting for tabs on it.
+            if not wait_for_place_loaded(driver, timeout=8):
+                print(f"  [WARNING] Place page did not load for: {key} (attempt {attempt}/{max_attempts}) -- "
+                      f"likely still on the generic Maps view.")
+                if attempt < max_attempts:
+                    time.sleep(3)
+                    continue
+                return []
 
             # ── Find & click Reviews tab ──────────────────────────────────────
             reviews_button = find_reviews_button(driver)
