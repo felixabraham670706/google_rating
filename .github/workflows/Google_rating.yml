@@ -28,14 +28,10 @@ jobs:
         uses: browser-actions/setup-chrome@v1
 
       # Read the ACTUAL installed Chrome's major version and pass it to
-      # daily.py directly (as CHROME_MAJOR_VERSION below). This is more
-      # reliable than undetected_chromedriver's own auto-detection: a run
-      # was observed where `uc` guessed chromedriver v153 while the real
-      # installed Chrome was v152 (uc overshoots by one on very new/beta
-      # milestone builds not yet fully in the chromedriver version
-      # registry). Reading the version straight from the binary sidesteps
-      # that mismatch and lets daily.py launch Chrome correctly on the
-      # first attempt instead of probing ~9 versions to find the right one.
+      # daily.py directly (as CHROME_MAJOR_VERSION below). A run's log
+      # showed undetected_chromedriver's own auto-detection guessing
+      # chromedriver v153 while the real installed Chrome was v152 --
+      # reading the version straight from the binary avoids that mismatch.
       - name: Log installed Chrome version
         id: chrome-version
         run: |
@@ -55,36 +51,12 @@ jobs:
           pip install -r requirements.txt
           python -m spacy download en_core_web_sm
 
-      # Persist the Chrome user-data-dir (profile) across runs, in the
-      # runner's cache, so daily.py isn't handed a brand new, cookie-less
-      # Chrome profile on every single run. A fresh, historyless profile is
-      # far more likely to get challenged with a sign-in / consent
-      # interstitial by Google -- which is what was intermittently breaking
-      # the "sort by Newest" step. Reusing the same profile makes the
-      # browser look like a returning, trusted client.
-      #
-      # Cache key includes the week number so the profile still gets
-      # refreshed periodically rather than growing forever; restore-keys
-      # falls back to the most recent available cache if that exact key
-      # isn't found yet (e.g. first run of a new week).
-      - name: Restore Chrome profile cache
-        uses: actions/cache@v4
-        with:
-          path: chrome_profile
-          key: chrome-profile-${{ runner.os }}-week-${{ github.run_id }}
-          restore-keys: |
-            chrome-profile-${{ runner.os }}-week-
-            chrome-profile-${{ runner.os }}-
-
       - name: Run Script
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           SENDER_EMAIL: ${{ secrets.SENDER_EMAIL }}
           RECEIVER_EMAIL: ${{ secrets.RECEIVER_EMAIL }}
           APP_PASSWORD: ${{ secrets.APP_PASSWORD }}
-          # Matches CHROME_PROFILE_DIR default fallback in daily.py, but set
-          # explicitly here so it's unambiguous which directory is cached.
-          CHROME_PROFILE_DIR: ${{ github.workspace }}/chrome_profile
           # The actual installed Chrome's major version, read above --
           # daily.py's create_driver() tries this first before falling
           # back to auto-detection / version probing.
@@ -92,16 +64,3 @@ jobs:
 
         run: |
           xvfb-run python daily.py
-
-      # actions/cache only saves automatically at the end of a successful
-      # job on a cache-miss; since we intentionally reuse the same key
-      # pattern across runs (via restore-keys) rather than a unique key per
-      # run, add an explicit save step so the profile picks up cookies /
-      # state from THIS run even when an earlier restore already hit a
-      # "cache exists" state for a broader key.
-      - name: Save Chrome profile cache
-        if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: chrome_profile
-          key: chrome-profile-${{ runner.os }}-week-${{ github.run_id }}
