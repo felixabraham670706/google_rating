@@ -6,7 +6,6 @@ import time
 import os, sys
 import random
 import re
-import requests
 import undetected_chromedriver as uc
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -53,25 +52,12 @@ branch_region_mapping = pd.read_excel('branch_region_mapping.xlsx')
 # ----------------------------------
 date_suffix = datetime.now().strftime("%d%b%Y")  # Get current date in ddmmmyyyy format e.g., '18Nov2025'
 
-# Persistent Chrome profile directory. Reusing the SAME profile across runs
-# (instead of a brand-new, cookie-less profile every time) makes Chrome look
-# like a returning/trusted client to Google, which cuts down on the random
-# "please sign in" / consent interstitial that was breaking the sort step
-# (the captured menu.html from a failed run shows literally no [role=menu]
-# element in the DOM at all -- i.e. the sort dropdown never opened, which is
-# what an overlay sitting on top of the page produces).
-#
-# On GitHub Actions, cache this directory between runs (actions/cache) or
-# every run gets a brand-new profile again and you're back to square one.
-CHROME_PROFILE_DIR = os.getenv(
-    "CHROME_PROFILE_DIR",
-    os.path.join(os.getcwd(), "chrome_profile")
-)
-os.makedirs(CHROME_PROFILE_DIR, exist_ok=True)
-
 # How many times to retry a branch end-to-end (reload + re-click) before
-# giving up on it. The sign-in/consent interstitial is intermittent, so a
-# reload usually clears it.
+# giving up on it. This targets ONE specific, confirmed problem: an
+# intermittent Google sign-in / consent interstitial that occasionally
+# appears right around the "Sort by Newest" step and blocks it (this was
+# the original, real complaint -- roughly 3 of 5 runs hit it). A reload
+# clears it almost every time.
 MAX_BRANCH_ATTEMPTS = 3
 
 # ----------------------------------
@@ -629,81 +615,59 @@ def generate_negative_reviews_daily_image(data: Dict[str, Any],
 
 # ── Driver ────────────────────────────────────────────────────────────────────
 
-def _build_chrome_options():
-    options = uc.ChromeOptions()
-    #options.add_argument("--headless")
-    options.add_argument("--lang=en")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--window-size=1920,1080")
-    options.add_argument("--start-maximized")
-    options.add_argument("--disable-blink-features=AutomationControlled")
-    options.add_argument("--disable-gpu")
-
-    # ── Persistent profile ──────────────────────────────────────────────────
-    # Reusing the same Chrome profile across runs (instead of a brand new,
-    # cookie-less one every time) makes the browser look like a returning
-    # client to Google, which is the main lever against the intermittent
-    # "please sign in" / consent interstitial that breaks the sort step.
-    options.add_argument(f"--user-data-dir={CHROME_PROFILE_DIR}")
-    options.add_argument("--profile-directory=Default")
-
-    options.add_experimental_option('prefs', {'intl.accept_languages': 'en,en_US'})
-    return options
-
-
 def create_driver():
     """
     Launch Chrome via undetected_chromedriver.
 
-    Version resolution order, fastest/most-reliable first:
+    Deliberately back to a plain, temp Chrome profile (no --user-data-dir).
+    A persistent profile was tried and made things WORSE -- a run showed it
+    breaking Google Maps' page routing entirely (every branch failed to
+    even reach its own place page, landing on the generic Maps view
+    instead), which never happened with a fresh temp profile. That's not
+    what the original problem was, so it's reverted.
 
-      1. CHROME_MAJOR_VERSION env var, if set. The CI workflow now reads the
-         ACTUAL installed Chrome's version directly (`chrome --version`) and
-         passes it in here. This is the most reliable source because it
-         completely sidesteps a real bug seen in production logs: `uc`'s own
-         auto-detection queried for chromedriver 153 while the actually
-         installed Chrome was 152 (uc overshoots by one on very new/beta
-         milestone builds that haven't fully propagated to the chromedriver
-         version registry yet). Using the version straight from the binary
-         itself can't have that mismatch.
-      2. `uc`'s own auto-detection (version_main omitted), if #1 isn't set.
-      3. A descending probe over a wide range of versions, only if both
-         #1 and #2 fail. This used to be the primary fallback and cost 9
-         failed launch attempts in one observed run (each with its own
-         chromedriver download) before landing on the right version --
-         it's now a true last resort rather than the main strategy.
+    The only real, confirmed fix kept here is version resolution:
+    read the ACTUAL installed Chrome version from the CHROME_MAJOR_VERSION
+    env var (the CI workflow sets this from `chrome --version`) instead of
+    a hardcoded version_main. A run's log showed uc's own auto-detection
+    guessing chromedriver v153 for an actually-installed Chrome v152 --
+    reading the real version straight from the binary avoids that mismatch
+    without probing through a dozen version numbers.
     """
+    def _options():
+        options = uc.ChromeOptions()
+        #options.add_argument("--headless")
+        options.add_argument("--lang=en")
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
+        options.add_argument("--window-size=1920,1080")
+        options.add_argument("--start-maximized")
+        options.add_argument("--disable-blink-features=AutomationControlled")
+        options.add_argument("--disable-gpu")
+        options.add_experimental_option('prefs', {'intl.accept_languages': 'en,en_US'})
+        return options
+
     env_version = os.getenv("CHROME_MAJOR_VERSION", "").strip()
     if env_version.isdigit():
         try:
-            options = _build_chrome_options()
-            driver = uc.Chrome(options=options, version_main=int(env_version))
-            print(f"[SETUP] Chrome launched successfully (version_main={env_version}, from CHROME_MAJOR_VERSION env var).\n")
+            driver = uc.Chrome(options=_options(), version_main=int(env_version))
+            print(f"[SETUP] Chrome launched successfully (version_main={env_version}, from CHROME_MAJOR_VERSION).\n")
             return driver
         except Exception as e:
             print(f"[SETUP] Launch with CHROME_MAJOR_VERSION={env_version} failed: {e}")
             print("[SETUP] Falling back to auto-detection...")
 
-    options = _build_chrome_options()
     try:
-        driver = uc.Chrome(options=options)  # version_main omitted -> auto-detect
+        driver = uc.Chrome(options=_options())  # version_main omitted -> auto-detect
         print("[SETUP] Chrome launched successfully (auto-detected version).\n")
         return driver
     except Exception as e:
         print(f"[SETUP] Auto-detected Chrome launch failed: {e}")
-        print("[SETUP] Falling back to explicit version probing...")
 
-    # Fallback: try a range of recent major versions explicitly, newest
-    # first (most likely to match a current runner). Only used if
-    # auto-detect above already failed. Chrome ships a new major version
-    # roughly every 4 weeks, so this range is kept wide (and descending)
-    # to reduce how often it needs manual bumping -- but it WILL eventually
-    # need raising as real Chrome versions move past the top of this range.
-    for candidate_version in range(160, 119, -1):
+    # Last resort: try current known-recent versions, newest first.
+    for candidate_version in range(160, 149, -1):
         try:
-            options = _build_chrome_options()  # fresh options object per attempt
-            driver = uc.Chrome(options=options, version_main=candidate_version)
+            driver = uc.Chrome(options=_options(), version_main=candidate_version)
             print(f"[SETUP] Chrome launched successfully (version_main={candidate_version}).\n")
             return driver
         except Exception as e:
@@ -711,28 +675,22 @@ def create_driver():
             continue
 
     raise RuntimeError(
-        "Could not launch Chrome via undetected_chromedriver, either by "
-        "auto-detection or by probing fallback versions 140-151. This is "
-        "likely an environment issue (Chrome not installed, or a chromedriver "
-        "cache from a previous version conflicting) rather than something "
-        "a version number can fix -- check the 'Install Chrome' step output."
+        "Could not launch Chrome via undetected_chromedriver. Check the "
+        "'Install Chrome' / 'Log installed Chrome version' step output in "
+        "the workflow run."
     )
 
 
 def dismiss_signin_or_consent_overlay(driver):
     """
-    Google Maps sometimes throws a cookie-consent banner or a "sign in"
-    nudge over the page before the Reviews/Sort UI is interactable. When
-    that happens, elements like the "Newest" menu item never appear in the
-    DOM at all, and it LOOKS like a scraping/selector bug
-    ("Newest sort option not found") when it's actually this overlay
-    blocking the page.
-
-    Tries a few known dismiss patterns. Returns True if something was
-    found and handled (dismissed, or detected as a sign-in modal so the
-    caller knows to reload/retry rather than keep hammering the same DOM).
+    This is the fix for the ORIGINAL, confirmed complaint: Google Maps
+    sometimes throws a cookie-consent banner or a "sign in" nudge over the
+    page right around the Sort step, which is why "Newest sort option not
+    found" only happened on some runs and not others. Tries a couple of
+    known dismiss patterns; if it's an actual sign-in modal that can't be
+    dismissed, returns True anyway so the caller knows to reload and retry
+    rather than keep hammering the same blocked DOM.
     """
-    # Cookie / consent banners -------------------------------------------------
     consent_strategies = [
         (By.XPATH, '//button[.//span[contains(text(),"Accept all")]]'),
         (By.XPATH, '//button[.//span[contains(text(),"Reject all")]]'),
@@ -750,7 +708,6 @@ def dismiss_signin_or_consent_overlay(driver):
         except Exception:
             continue
 
-    # Dismissible "sign in" nudge banners (small X / "Not now") ---------------
     dismiss_strategies = [
         (By.XPATH, '//button[contains(@aria-label,"Dismiss")]'),
         (By.XPATH, '//button[contains(@aria-label,"Not now")]'),
@@ -765,9 +722,6 @@ def dismiss_signin_or_consent_overlay(driver):
         except Exception:
             continue
 
-    # Embedded Google sign-in iframe/modal (accounts.google.com) -------------
-    # This one usually can't be "dismissed" cleanly -- best move is to signal
-    # to the caller that it was detected, so it reloads the page and retries.
     try:
         driver.find_element(By.XPATH, '//iframe[contains(@src,"accounts.google.com")]')
         print("  [INFO] Sign-in overlay detected.")
@@ -782,74 +736,6 @@ def dismiss_signin_or_consent_overlay(driver):
     except Exception:
         pass
 
-    return False
-
-
-def resolve_maps_url(short_url, timeout=10):
-    """
-    Resolve a maps.app.goo.gl short link to its final canonical
-    google.com/maps/place/... URL over plain HTTP, BEFORE handing it to
-    Selenium.
-
-    Why: the short link's redirect to the specific place can depend on
-    client-side JS timing inside the browser. A run with a brand-new,
-    freshly-created profile (cold caches, nothing pre-warmed) loads slower,
-    and if that redirect hasn't finished by the time the code checks for
-    '//div[@role="main"]', it proceeds against the GENERIC Google Maps
-    homepage instead of the specific branch's page -- which has no Reviews
-    tab because no specific place was ever loaded. That's exactly what a
-    run showed: every branch failed at "Reviews button not found", and the
-    dumped page elements (traffic banner, generic category chips, "United
-    States" map attribution) were the generic Maps view, not a place page.
-
-    Resolving the redirect via a plain HTTP request sidesteps the whole
-    timing dependency -- requests' redirect handling is synchronous and
-    doesn't depend on the browser having rendered/executed anything.
-
-    Falls back to the original short_url if resolution fails for any
-    reason (network hiccup, etc.) -- Selenium then follows the redirect
-    itself as it did before this change, so this is purely additive safety.
-    """
-    try:
-        resp = requests.head(short_url, allow_redirects=True, timeout=timeout)
-        if resp.url and resp.url != short_url:
-            return resp.url
-    except Exception:
-        pass
-    try:
-        resp = requests.get(short_url, allow_redirects=True, timeout=timeout)
-        if resp.url and resp.url != short_url:
-            return resp.url
-    except Exception:
-        pass
-    return short_url
-
-
-def wait_for_place_loaded(driver, timeout=10):
-    """
-    Confirm the browser has actually landed on a SPECIFIC place's page
-    (the branch's own Maps listing), not the generic Maps homepage/search
-    view. '//div[@role="main"]' alone doesn't distinguish the two -- both
-    have a role="main" container -- which is what let the code previously
-    race ahead before the real place had loaded.
-
-    The place-name heading (Google's "DUwDvf" class -- the h1 element
-    showing the business name at the top of its info panel) only exists
-    once a specific place is loaded, so its presence is a much more
-    reliable signal than role="main".
-    """
-    strategies = [
-        (By.XPATH, '//h1[contains(@class,"DUwDvf")]'),
-        (By.XPATH, '//div[@role="main"]//h1'),
-    ]
-    short_wait = WebDriverWait(driver, timeout)
-    for by, selector in strategies:
-        try:
-            el = short_wait.until(EC.presence_of_element_located((by, selector)))
-            if el.text.strip():
-                return True
-        except Exception:
-            continue
     return False
 
 
@@ -1142,37 +1028,45 @@ def scroll_and_extract(driver, reviews_container):
     return all_reviews
 
 
+# ── Preprocessing ─────────────────────────────────────────────────────────────
+
+def preprocess_reviews(reviews_df):
+    reviews_df = reviews_df.drop(columns=['review_id'], errors='ignore')
+    reviews_df = reviews_df.rename(columns={
+        'date':     'User_review_date',
+        'rating':   'User_review_rating',
+        'comment':  'User_comment_review',
+        'response': 'Response_to_review'
+    })
+    rating_mapping = {
+        'نجمة واحدة': '1 star',
+        'نجمتان (2)': '2 stars',
+        '3 نجوم':     '3 stars',
+        '4 نجوم':     '4 stars',
+        '5 نجوم':     '5 stars'
+    }
+    reviews_df['User_review_rating'] = reviews_df['User_review_rating'].replace(rating_mapping)
+    reviews_df['label_rating'] = reviews_df['User_review_rating'].str.split().str[0].astype(int)
+    reviews_df['label_flag']   = reviews_df['label_rating'].apply(label_rating)
+    reviews_df['User_comment_review'] = reviews_df['User_comment_review'].fillna('')
+    reviews_df['Response_to_review']  = reviews_df['Response_to_review'].fillna('')
+    return reviews_df
+
+
 # ── Branch processing with retry ───────────────────────────────────────────────
 
 def process_branch(driver, wait, key, value, max_attempts=MAX_BRANCH_ATTEMPTS):
     """
-    Loads a branch's Maps page, opens Reviews, sorts by Newest, and scrolls
-    to collect the last 24h of reviews.
-
-    Wrapped in a retry loop because two different failure modes have been
-    observed, both intermittent and both fixed the same way (reload and
-    retry against a resolved URL):
-      1. A sign-in / consent overlay blocking the sort UI (confirmed by a
-         captured menu.html showing literally no [role=menu] element in
-         the DOM on a failed run).
-      2. The short link's redirect not completing before the code checked
-         readiness, landing on the GENERIC Google Maps view instead of the
-         branch's specific page -- confirmed by a run where every branch
-         failed at "Reviews button not found" and the dumped page elements
-         were generic Maps chrome (traffic banner, category chips, "United
-         States" attribution), not a place page. Resolving the short link
-         to its canonical URL over plain HTTP up front (see
-         resolve_maps_url) and then explicitly confirming the place loaded
-         (see wait_for_place_loaded) closes this second failure mode at
-         its source rather than just retrying blindly into the same race.
+    Same navigation as the original code (driver.get straight on the short
+    link -- letting Chrome follow the redirect itself, exactly as before,
+    since that always landed on the correct branch page). The only
+    addition is: if the sign-in/consent overlay shows up and blocks the
+    Sort step, dismiss it and reload/retry instead of skipping the branch
+    outright.
     """
-    resolved_url = resolve_maps_url(value)
-    if resolved_url != value:
-        print(f"  [INFO] Resolved short link for {key}")
-
     for attempt in range(1, max_attempts + 1):
         try:
-            driver.get(resolved_url)
+            driver.get(value)
 
             try:
                 wait.until(EC.presence_of_element_located((By.XPATH, '//div[@role="main"]')))
@@ -1184,16 +1078,6 @@ def process_branch(driver, wait, key, value, max_attempts=MAX_BRANCH_ATTEMPTS):
             overlay_seen = dismiss_signin_or_consent_overlay(driver)
             if overlay_seen:
                 time.sleep(1)
-
-            # Confirm we actually landed on the branch's own place page
-            # (not the generic Maps homepage) before hunting for tabs on it.
-            if not wait_for_place_loaded(driver, timeout=8):
-                print(f"  [WARNING] Place page did not load for: {key} (attempt {attempt}/{max_attempts}) -- "
-                      f"likely still on the generic Maps view.")
-                if attempt < max_attempts:
-                    time.sleep(3)
-                    continue
-                return []
 
             # ── Find & click Reviews tab ──────────────────────────────────────
             reviews_button = find_reviews_button(driver)
@@ -1250,31 +1134,6 @@ def process_branch(driver, wait, key, value, max_attempts=MAX_BRANCH_ATTEMPTS):
             return []
 
     return []
-
-
-# ── Preprocessing ─────────────────────────────────────────────────────────────
-
-def preprocess_reviews(reviews_df):
-    reviews_df = reviews_df.drop(columns=['review_id'], errors='ignore')
-    reviews_df = reviews_df.rename(columns={
-        'date':     'User_review_date',
-        'rating':   'User_review_rating',
-        'comment':  'User_comment_review',
-        'response': 'Response_to_review'
-    })
-    rating_mapping = {
-        'نجمة واحدة': '1 star',
-        'نجمتان (2)': '2 stars',
-        '3 نجوم':     '3 stars',
-        '4 نجوم':     '4 stars',
-        '5 نجوم':     '5 stars'
-    }
-    reviews_df['User_review_rating'] = reviews_df['User_review_rating'].replace(rating_mapping)
-    reviews_df['label_rating'] = reviews_df['User_review_rating'].str.split().str[0].astype(int)
-    reviews_df['label_flag']   = reviews_df['label_rating'].apply(label_rating)
-    reviews_df['User_comment_review'] = reviews_df['User_comment_review'].fillna('')
-    reviews_df['Response_to_review']  = reviews_df['Response_to_review'].fillna('')
-    return reviews_df
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
