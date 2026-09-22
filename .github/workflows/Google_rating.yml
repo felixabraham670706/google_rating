@@ -27,14 +27,23 @@ jobs:
         id: install-chrome
         uses: browser-actions/setup-chrome@v1
 
-      # daily.py's create_driver() now auto-detects the installed Chrome
-      # version via undetected_chromedriver (no more hardcoded version_main),
-      # so this step is just visibility -- if a run ever fails at the
-      # "Run Script" step during Chrome launch, check this line first to see
-      # exactly which Chrome build was actually installed that run.
+      # Read the ACTUAL installed Chrome's major version and pass it to
+      # daily.py directly (as CHROME_MAJOR_VERSION below). This is more
+      # reliable than undetected_chromedriver's own auto-detection: a run
+      # was observed where `uc` guessed chromedriver v153 while the real
+      # installed Chrome was v152 (uc overshoots by one on very new/beta
+      # milestone builds not yet fully in the chromedriver version
+      # registry). Reading the version straight from the binary sidesteps
+      # that mismatch and lets daily.py launch Chrome correctly on the
+      # first attempt instead of probing ~9 versions to find the right one.
       - name: Log installed Chrome version
+        id: chrome-version
         run: |
-          "${{ steps.install-chrome.outputs.chrome-path }}" --version
+          VERSION_STRING=$("${{ steps.install-chrome.outputs.chrome-path }}" --version)
+          echo "Installed Chrome: $VERSION_STRING"
+          MAJOR_VERSION=$(echo "$VERSION_STRING" | grep -oP '\d+' | head -1)
+          echo "Detected major version: $MAJOR_VERSION"
+          echo "major-version=$MAJOR_VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Install XVFB
         run: |
@@ -76,6 +85,10 @@ jobs:
           # Matches CHROME_PROFILE_DIR default fallback in daily.py, but set
           # explicitly here so it's unambiguous which directory is cached.
           CHROME_PROFILE_DIR: ${{ github.workspace }}/chrome_profile
+          # The actual installed Chrome's major version, read above --
+          # daily.py's create_driver() tries this first before falling
+          # back to auto-detection / version probing.
+          CHROME_MAJOR_VERSION: ${{ steps.chrome-version.outputs.major-version }}
 
         run: |
           xvfb-run python daily.py
