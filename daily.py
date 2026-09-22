@@ -682,10 +682,13 @@ def create_driver():
         print(f"[SETUP] Auto-detected Chrome launch failed: {e}")
         print("[SETUP] Falling back to explicit version probing...")
 
-    # Fallback: try a small range of recent major versions explicitly.
-    # Adjust this range occasionally as Chrome's release train moves on;
-    # it only gets used if auto-detect above already failed.
-    for candidate_version in range(140, 152):
+    # Fallback: try a range of recent major versions explicitly, newest
+    # first (most likely to match a current runner). Only used if
+    # auto-detect above already failed. Chrome ships a new major version
+    # roughly every 4 weeks, so this range is kept wide (and descending)
+    # to reduce how often it needs manual bumping -- but it WILL eventually
+    # need raising as real Chrome versions move past the top of this range.
+    for candidate_version in range(160, 119, -1):
         try:
             options = _build_chrome_options()  # fresh options object per attempt
             driver = uc.Chrome(options=options, version_main=candidate_version)
