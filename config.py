@@ -4,9 +4,6 @@
 list_of_links = {
 'ENBD - Abu Dhabi - Abu Dhabi Main Office branch' : 'https://maps.app.goo.gl/e8LRD3JenGskh8Gd7',
 'ENBD - Abu Dhabi - Electra Street Branch' : 'https://maps.app.goo.gl/7DkeJZcgaSbcK5ev7',
-'ENBD - Abu Dhabi - Tourist Club Branch' : 'https://maps.app.goo.gl/bGziw18wxogPt2kbA',
-'ENBD - Abu Dhabi - Al Ain Khalifa street Branch' : 'https://maps.app.goo.gl/VdBcEnq6fEKvAgpY8',
-'ENBD - Abu Dhabi - Dalma Mall Branch' : 'https://maps.app.goo.gl/VKsjzRqAdcQXWeNr9',
 'ENBD - Abu Dhabi - Khalifa Branch' : 'https://maps.app.goo.gl/Hbt5xb5DNGSqXRVC6',
 
 # 72 ENBD
