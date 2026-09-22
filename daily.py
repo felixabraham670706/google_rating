@@ -684,12 +684,27 @@ def create_driver():
 def dismiss_signin_or_consent_overlay(driver):
     """
     This is the fix for the ORIGINAL, confirmed complaint: Google Maps
-    sometimes throws a cookie-consent banner or a "sign in" nudge over the
-    page right around the Sort step, which is why "Newest sort option not
-    found" only happened on some runs and not others. Tries a couple of
-    known dismiss patterns; if it's an actual sign-in modal that can't be
-    dismissed, returns True anyway so the caller knows to reload and retry
-    rather than keep hammering the same blocked DOM.
+    sometimes throws a cookie-consent banner over the page right around the
+    Sort step, which is why "Newest sort option not found" only happened on
+    some runs and not others.
+
+    IMPORTANT: this ONLY clicks exact "Accept all" / "Reject all" consent
+    buttons -- it deliberately does NOT click anything matched by a broad
+    aria-label like "Close", "Dismiss", or "Not now". Those broad matches
+    were tried in an earlier version and turned out to be the actual cause
+    of a full regression: Google Maps' own place page ALWAYS has a
+    legitimate button with aria-label="Close" on it (for the side panel,
+    an image viewer, etc. -- visible in every branch's button dump, not
+    just failing ones), and matching on that generic label auto-clicked it
+    right after page load, closing the branch's own info panel and
+    dropping the page back to the plain Maps view -- which is exactly the
+    "Reviews button not found" / generic-Maps-view symptom that showed up
+    on every single branch once this function started running. Do not
+    re-add broad "Close"/"Dismiss"/"Not now" matching here.
+
+    If it's an actual sign-in modal (which can't be safely auto-clicked
+    without the same risk), this only detects and logs it -- the caller's
+    retry-with-reload handles recovery instead.
     """
     consent_strategies = [
         (By.XPATH, '//button[.//span[contains(text(),"Accept all")]]'),
@@ -700,20 +715,6 @@ def dismiss_signin_or_consent_overlay(driver):
         (By.XPATH, '//button[contains(text(),"رفض الكل")]'),
     ]
     for by, sel in consent_strategies:
-        try:
-            btn = WebDriverWait(driver, 2).until(EC.element_to_be_clickable((by, sel)))
-            btn.click()
-            time.sleep(1)
-            return True
-        except Exception:
-            continue
-
-    dismiss_strategies = [
-        (By.XPATH, '//button[contains(@aria-label,"Dismiss")]'),
-        (By.XPATH, '//button[contains(@aria-label,"Not now")]'),
-        (By.XPATH, '//button[contains(@aria-label,"Close")]'),
-    ]
-    for by, sel in dismiss_strategies:
         try:
             btn = WebDriverWait(driver, 2).until(EC.element_to_be_clickable((by, sel)))
             btn.click()
