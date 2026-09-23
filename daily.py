@@ -1079,6 +1079,15 @@ def process_branch(driver, wait, key, value, max_attempts=MAX_BRANCH_ATTEMPTS):
     addition is: if the sign-in/consent overlay shows up and blocks the
     Sort step, dismiss it and reload/retry instead of skipping the branch
     outright.
+
+    Returns (raw_reviews, blocked):
+      - blocked=True  -> every attempt failed before ever reaching the
+        scroll/extract step (Reviews button, Sort, or reviews container
+        never became available). This is a genuine failure -- the caller
+        may want to restart the whole browser and retry.
+      - blocked=False -> we successfully reached and read the reviews
+        container. raw_reviews may still be an empty list, but that's a
+        legitimate "no reviews in the last 24 hours", not a failure.
     """
     for attempt in range(1, max_attempts + 1):
         try:
@@ -1108,7 +1117,7 @@ def process_branch(driver, wait, key, value, max_attempts=MAX_BRANCH_ATTEMPTS):
                     text  = btn.text[:60] if btn.text else ''
                     if label or text:
                         print(f"    text='{text}' | aria-label='{label}'")
-                return []
+                return [], True
 
             reviews_button.click()
             time.sleep(0.3)
@@ -1126,7 +1135,7 @@ def process_branch(driver, wait, key, value, max_attempts=MAX_BRANCH_ATTEMPTS):
                     print(f"  [INFO] Reloading and retrying {key}...")
                     time.sleep(3)
                     continue
-                return []
+                return [], True
             time.sleep(2)
 
             # ── Find scrollable container ─────────────────────────────────────
@@ -1136,20 +1145,20 @@ def process_branch(driver, wait, key, value, max_attempts=MAX_BRANCH_ATTEMPTS):
                 if attempt < max_attempts:
                     time.sleep(3)
                     continue
-                return []
+                return [], True
 
             # ── Scroll & extract ──────────────────────────────────────────────
             raw_reviews = scroll_and_extract(driver, reviews_container)
-            return raw_reviews
+            return raw_reviews, False
 
         except Exception as e:
             print(f"  [ERROR] {key} (attempt {attempt}/{max_attempts}): {e}")
             if attempt < max_attempts:
                 time.sleep(3)
                 continue
-            return []
+            return [], True
 
-    return []
+    return [], True
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -1163,7 +1172,18 @@ wait   = WebDriverWait(driver, 10)
 all_reviews_rows  = []
 no_negative_reviews = 0
 
-for key, value in enbd_only.items():
+# If the block shows up right on the FIRST branch of a run, that points at
+# something wrong with this particular browser session/launch itself (rather
+# than a per-branch fluke), since every later branch reuses the same Chrome
+# instance. So the "quit and relaunch Chrome" recovery is only applied to the
+# first branch: if that one comes through clean (after a restart if needed),
+# the rest of the run keeps using that same browser exactly as before, with
+# no restart logic on later branches. If it were genuinely IP/pattern-based
+# blocking, no amount of restarting would fix it anyway -- this is purely to
+# rule out a bad initial session.
+MAX_FIRST_BRANCH_RESTARTS = 5
+
+for i, (key, value) in enumerate(enbd_only.items()):
 
     sleep_time = random.uniform(5, 15)
     print(f"Sleeping for {sleep_time:.2f} seconds...")
@@ -1171,7 +1191,27 @@ for key, value in enbd_only.items():
 
     print(f"\n[BRANCH] {key}")
 
-    raw_reviews = process_branch(driver, wait, key, value)
+    raw_reviews, blocked = process_branch(driver, wait, key, value)
+
+    if i == 0:
+        restarts_used = 0
+        while blocked and restarts_used < MAX_FIRST_BRANCH_RESTARTS:
+            restarts_used += 1
+            print(f"  [INFO] First branch ({key}) still blocked after "
+                  f"{MAX_BRANCH_ATTEMPTS} attempts -- restarting browser "
+                  f"({restarts_used}/{MAX_FIRST_BRANCH_RESTARTS}) and retrying...")
+            try:
+                driver.quit()
+            except Exception:
+                pass
+            driver = create_driver()
+            wait   = WebDriverWait(driver, 10)
+            time.sleep(3)
+            raw_reviews, blocked = process_branch(driver, wait, key, value)
+
+    if blocked:
+        print(f"  [WARNING] {key} still blocked -- skipping.")
+        continue
 
     if not raw_reviews:
         print(f"  [INFO] No reviews in last 24 hours for: {key}")
